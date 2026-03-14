@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Select Region</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+      cursor: crosshair;
+      user-select: none;
+    }
+
+    /* Semi-transparent dark overlay that covers everything */
+    #mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.35);
+    }
+
+    /* The selection rectangle - punches through the mask visually */
+    #selection {
+      position: absolute;
+      border: 2px solid #00d4ff;
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35); /* dim outside selection */
+      background: transparent;
+      display: none;
+      pointer-events: none;
+    }
+
+    /* Instruction label */
+    #hint {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 18px;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+      pointer-events: none;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    #hint span {
+      font-size: 13px;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <div id="mask"></div>
+  <div id="selection"></div>
+  <div id="hint">
+    Drag to select recording area<br>
+    <span>Press Esc to cancel</span>
+  </div>
+  <script src="overlay.js"></script>
+</body>
+</html>

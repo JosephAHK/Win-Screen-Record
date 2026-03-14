@@ -1,0 +1,15 @@
+{
+  "name": "win-screen-record",
+  "version": "1.0.0",
+  "description": "Lightweight Windows screen recorder",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0"
+  }
+}
