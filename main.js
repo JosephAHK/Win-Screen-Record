@@ -85,7 +85,8 @@ function createTray() {
       type: 'checkbox',
       checked: launchAtStartup,
       click: (item) => {
-        app.setLoginItemSettings({ openAtLogin: item.checked, path: process.execPath });
+        const electronExe = path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe');
+        app.setLoginItemSettings({ openAtLogin: item.checked, path: electronExe, args: [__dirname] });
       },
     },
     { type: 'separator' },
@@ -288,10 +289,12 @@ app.whenReady().then(() => {
   app.setAppUserModelId('WinScreenRecord');
 
   // Register to launch automatically with Windows (writes to HKCU Run key)
+  // Use the bundled electron.exe directly so it works without a terminal
+  const electronExe = path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe');
   app.setLoginItemSettings({
     openAtLogin: true,
-    path: process.execPath,
-    args: [],
+    path: electronExe,
+    args: [__dirname],
   });
 
   createTray();
