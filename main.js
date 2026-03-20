@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen, Tray, Menu, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execFile } = require('child_process');
 const os = require('os');
 
 const ffmpegPath = require('ffmpeg-static');
@@ -10,7 +10,10 @@ let controlsWindow = null;
 let borderWindow  = null;
 let tray          = null;
 let ffmpegProcess = null;
+let audioMeterProcess = null;
 let isRecording   = false;
+let isMicMuted    = false;
+let micDeviceName = null;
 
 // Hotkey to start a new selection (Ctrl+Shift+R)
 const HOTKEY = 'Ctrl+Shift+R';
@@ -42,6 +45,79 @@ function restoreWindowsSounds() {
     ], { stdio: 'ignore', timeout: 2000 });
     originalSoundScheme = null;
   } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// Microphone device discovery — find the first available mic via ffmpeg/dshow
+// ---------------------------------------------------------------------------
+function findMicDevice() {
+  return new Promise((resolve) => {
+    const proc = spawn(ffmpegPath, [
+      '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let output = '';
+    proc.stderr.on('data', (d) => { output += d.toString(); });
+    proc.stdout.on('data', (d) => { output += d.toString(); });
+
+    proc.on('close', () => {
+      // Look for audio devices section, grab the first device name
+      const lines = output.split('\n');
+      let inAudio = false;
+      for (const line of lines) {
+        if (line.includes('DirectShow audio devices')) { inAudio = true; continue; }
+        if (inAudio) {
+          const match = line.match(/"([^"]+)"/);
+          if (match && !line.includes('Alternative name')) {
+            resolve(match[1]);
+            return;
+          }
+        }
+      }
+      resolve(null);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Audio level meter — runs a separate ffmpeg that reads the mic and outputs
+// volume stats, which we parse and forward to the controls window
+// ---------------------------------------------------------------------------
+function startAudioMeter() {
+  if (!micDeviceName || !controlsWindow) return;
+
+  audioMeterProcess = spawn(ffmpegPath, [
+    '-f', 'dshow',
+    '-i', `audio=${micDeviceName}`,
+    '-af', 'astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-',
+    '-f', 'null', '-'
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  // astats outputs RMS level values to stdout via ametadata print
+  audioMeterProcess.stdout.on('data', (data) => {
+    if (isMicMuted || !controlsWindow) return;
+    const text = data.toString();
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const match = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+|inf|-inf)/);
+      if (match) {
+        const db = parseFloat(match[1]);
+        // Convert dB to 0-1 range: -60dB=0, 0dB=1
+        const level = isNaN(db) || db === -Infinity ? 0 : Math.max(0, Math.min(1, (db + 60) / 60));
+        try { controlsWindow.webContents.send('audio-level', level); } catch (_) {}
+      }
+    }
+  });
+
+  audioMeterProcess.on('close', () => { audioMeterProcess = null; });
+}
+
+function stopAudioMeter() {
+  if (audioMeterProcess) {
+    try { audioMeterProcess.stdin.write('q'); audioMeterProcess.stdin.end(); } catch (_) {}
+    try { audioMeterProcess.kill(); } catch (_) {}
+    audioMeterProcess = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +249,7 @@ function createBorderWindow(region) {
 // ---------------------------------------------------------------------------
 function createControls() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  const panelWidth = 90, panelHeight = 160;
+  const panelWidth = 90, panelHeight = 190;
 
   controlsWindow = new BrowserWindow({
     x: width - panelWidth - 8,
@@ -198,13 +274,18 @@ function createControls() {
 // ---------------------------------------------------------------------------
 // ffmpeg recording
 // ---------------------------------------------------------------------------
-function startRecording(region) {
+async function startRecording(region) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const outputFile = path.join(os.homedir(), 'Desktop', `recording-${timestamp}.mp4`);
 
   // libx264 requires even dimensions
   const w = region.width  % 2 === 0 ? region.width  : region.width  - 1;
   const h = region.height % 2 === 0 ? region.height : region.height - 1;
+
+  // Discover mic on first recording
+  if (micDeviceName === null) {
+    micDeviceName = await findMicDevice() || false;
+  }
 
   const args = [
     '-f', 'gdigrab',
@@ -213,20 +294,39 @@ function startRecording(region) {
     '-offset_y', String(region.y),
     '-video_size', `${w}x${h}`,
     '-i', 'desktop',
+  ];
+
+  // Add mic audio input if available and not muted
+  if (micDeviceName && !isMicMuted) {
+    args.push('-f', 'dshow', '-i', `audio=${micDeviceName}`);
+  }
+
+  args.push(
     '-vcodec', 'libx264',
     '-crf', '15',
     '-preset', 'fast',
     '-pix_fmt', 'yuv420p',
-    '-movflags', '+faststart',
-    outputFile,
-  ];
+  );
+
+  // If audio is included, encode it with AAC
+  if (micDeviceName && !isMicMuted) {
+    args.push('-acodec', 'aac', '-b:a', '192k');
+  }
+
+  args.push('-movflags', '+faststart', outputFile);
 
   ffmpegProcess = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
   ffmpegProcess.on('close', () => { ffmpegProcess = null; });
   isRecording = true;
+
+  // Start the audio level meter for the controls UI
+  if (micDeviceName && !isMicMuted) {
+    startAudioMeter();
+  }
 }
 
 function stopRecording() {
+  stopAudioMeter();
   if (ffmpegProcess) {
     try {
       ffmpegProcess.stdin.write('q');
@@ -237,6 +337,7 @@ function stopRecording() {
     ffmpegProcess = null;
   }
   isRecording = false;
+  isMicMuted = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,11 +362,11 @@ function cleanup() {
 // ---------------------------------------------------------------------------
 
 // User finished drawing the selection rectangle
-ipcMain.on('region-selected', (event, region) => {
+ipcMain.on('region-selected', async (event, region) => {
   if (overlayWindow) { overlayWindow.close(); overlayWindow = null; }
-  startRecording(region);
   createBorderWindow(region);
   createControls();
+  await startRecording(region);
 });
 
 // User pressed Escape on the overlay
@@ -279,6 +380,21 @@ ipcMain.on('stop-recording', () => {
   stopRecording();
   cleanupRecordingUI();
   // App stays running — ready for next recording via hotkey or tray
+});
+
+// Mic mute/unmute toggle from controls panel
+ipcMain.on('toggle-mic', () => {
+  isMicMuted = !isMicMuted;
+  if (controlsWindow) {
+    controlsWindow.webContents.send('mic-muted', isMicMuted);
+  }
+  if (isMicMuted) {
+    stopAudioMeter();
+    // Send zero level so the meter goes silent
+    if (controlsWindow) controlsWindow.webContents.send('audio-level', 0);
+  } else if (isRecording && micDeviceName) {
+    startAudioMeter();
+  }
 });
 
 // ---------------------------------------------------------------------------
