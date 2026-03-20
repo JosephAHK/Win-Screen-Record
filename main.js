@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, screen, Tray, Menu, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
+const fs = require('fs');
 const os = require('os');
 
 const ffmpegPath = require('ffmpeg-static');
@@ -9,7 +10,11 @@ let overlayWindow = null;
 let controlsWindow = null;
 let borderWindow  = null;
 let tray          = null;
-let ffmpegProcess = null;
+let ffmpegVideo   = null;  // video-only ffmpeg process
+let ffmpegAudio   = null;  // audio-only ffmpeg process (separate to avoid jitter)
+let videoTmpFile  = null;
+let audioTmpFile  = null;
+let finalOutFile  = null;
 let isRecording   = false;
 let isPendingRecord = false;  // true after region selected, before record pressed
 let pendingRegion = null;     // stored region awaiting record button
@@ -227,58 +232,101 @@ function createControls() {
 }
 
 // ---------------------------------------------------------------------------
-// ffmpeg recording
+// ffmpeg recording — video and audio run as separate processes to avoid jitter,
+// then get muxed into the final MP4 on stop.
 // ---------------------------------------------------------------------------
 function startRecording(region) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const outputFile = path.join(os.homedir(), 'Desktop', `recording-${timestamp}.mp4`);
+  const tmpDir = os.tmpdir();
+  videoTmpFile = path.join(tmpDir, `rec-video-${timestamp}.mp4`);
+  audioTmpFile = path.join(tmpDir, `rec-audio-${timestamp}.m4a`);
+  finalOutFile = path.join(os.homedir(), 'Desktop', `recording-${timestamp}.mp4`);
 
   // libx264 requires even dimensions
   const w = region.width  % 2 === 0 ? region.width  : region.width  - 1;
   const h = region.height % 2 === 0 ? region.height : region.height - 1;
 
-  const args = [
+  // Video-only process
+  ffmpegVideo = spawn(ffmpegPath, [
     '-f', 'gdigrab',
     '-framerate', '60',
     '-offset_x', String(region.x),
     '-offset_y', String(region.y),
     '-video_size', `${w}x${h}`,
     '-i', 'desktop',
-  ];
-
-  // Add mic audio input if available and not muted
-  if (micDeviceName && !isMicMuted) {
-    args.push('-f', 'dshow', '-i', `audio=${micDeviceName}`);
-  }
-
-  args.push(
     '-vcodec', 'libx264',
     '-crf', '15',
     '-preset', 'fast',
     '-pix_fmt', 'yuv420p',
-  );
+    videoTmpFile,
+  ], { stdio: ['pipe', 'ignore', 'ignore'] });
+  ffmpegVideo.on('close', () => { ffmpegVideo = null; });
 
+  // Audio-only process (if mic available and not muted)
   if (micDeviceName && !isMicMuted) {
-    args.push('-acodec', 'aac', '-b:a', '192k');
+    ffmpegAudio = spawn(ffmpegPath, [
+      '-f', 'dshow',
+      '-i', `audio=${micDeviceName}`,
+      '-acodec', 'aac',
+      '-b:a', '192k',
+      audioTmpFile,
+    ], { stdio: ['pipe', 'ignore', 'ignore'] });
+    ffmpegAudio.on('close', () => { ffmpegAudio = null; });
   }
 
-  args.push('-movflags', '+faststart', outputFile);
-
-  ffmpegProcess = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
-  ffmpegProcess.on('close', () => { ffmpegProcess = null; });
   isRecording = true;
 }
 
-function stopRecording() {
-  if (ffmpegProcess) {
-    try {
-      ffmpegProcess.stdin.write('q');
-      ffmpegProcess.stdin.end();
-    } catch (_) {
-      ffmpegProcess.kill('SIGTERM');
+// Gracefully stop an ffmpeg process and wait for it to exit
+function stopFfmpeg(proc) {
+  return new Promise((resolve) => {
+    if (!proc) { resolve(); return; }
+    proc.on('close', resolve);
+    try { proc.stdin.write('q'); proc.stdin.end(); } catch (_) {
+      try { proc.kill('SIGTERM'); } catch (__) {}
     }
-    ffmpegProcess = null;
+  });
+}
+
+async function stopRecording() {
+  const hadAudio = !!ffmpegAudio;
+
+  // Stop both processes in parallel, wait for both to finish writing
+  await Promise.all([stopFfmpeg(ffmpegVideo), stopFfmpeg(ffmpegAudio)]);
+  ffmpegVideo = null;
+  ffmpegAudio = null;
+
+  // Mux video + audio into the final file (or just move video if no audio)
+  if (hadAudio && videoTmpFile && audioTmpFile && finalOutFile) {
+    try {
+      // Mux with stream copy — near-instant, no re-encoding
+      await new Promise((resolve, reject) => {
+        const mux = spawn(ffmpegPath, [
+          '-i', videoTmpFile,
+          '-i', audioTmpFile,
+          '-c', 'copy',
+          '-movflags', '+faststart',
+          '-shortest',
+          finalOutFile,
+        ], { stdio: ['ignore', 'ignore', 'ignore'] });
+        mux.on('close', (code) => {
+          try { fs.unlinkSync(videoTmpFile); } catch (_) {}
+          try { fs.unlinkSync(audioTmpFile); } catch (_) {}
+          code === 0 ? resolve() : reject();
+        });
+      });
+    } catch (_) {
+      // If mux fails, keep the video-only file as fallback
+      try { fs.renameSync(videoTmpFile, finalOutFile); } catch (__) {}
+      try { fs.unlinkSync(audioTmpFile); } catch (__) {}
+    }
+  } else if (videoTmpFile && finalOutFile) {
+    try { fs.renameSync(videoTmpFile, finalOutFile); } catch (_) {}
   }
+
+  videoTmpFile = null;
+  audioTmpFile = null;
+  finalOutFile = null;
   isRecording = false;
   isPendingRecord = false;
   pendingRegion = null;
@@ -295,8 +343,8 @@ function cleanupRecordingUI() {
 }
 
 // Full cleanup on app quit
-function cleanup() {
-  stopRecording();
+async function cleanup() {
+  await stopRecording();
   cleanupRecordingUI();
   if (overlayWindow) { overlayWindow.close(); overlayWindow = null; }
   globalShortcut.unregisterAll();
@@ -323,13 +371,13 @@ ipcMain.on('region-selected', async (event, region) => {
 });
 
 // User clicked Record in the controls panel
-ipcMain.on('start-recording', async () => {
+ipcMain.on('start-recording', () => {
   if (!pendingRegion || isRecording) return;
   const region = pendingRegion;
   pendingRegion = null;
   isPendingRecord = false;
 
-  await startRecording(region);
+  startRecording(region);
 
   // Notify controls to switch to recording UI
   if (controlsWindow) {
@@ -352,10 +400,9 @@ ipcMain.on('cancel-prerecord', () => {
 });
 
 // Stop button clicked in controls panel
-ipcMain.on('stop-recording', () => {
-  stopRecording();
+ipcMain.on('stop-recording', async () => {
   cleanupRecordingUI();
-  // App stays running — ready for next recording via hotkey or tray
+  await stopRecording();
 });
 
 // Mic mute/unmute toggle from controls panel
@@ -385,10 +432,10 @@ app.whenReady().then(() => {
   createTray();
 
   // Register global hotkey
-  globalShortcut.register(HOTKEY, () => {
+  globalShortcut.register(HOTKEY, async () => {
     if (isRecording || isPendingRecord) {
-      stopRecording();
       cleanupRecordingUI();
+      await stopRecording();
     } else {
       startSelection();
     }
