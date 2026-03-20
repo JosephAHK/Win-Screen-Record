@@ -1,0 +1,22 @@
+---
+alwaysApply: true
+---
+# GitHub Workflow
+
+## Pushing Changes
+- Always use the GitHub CLI (`gh`) and `git` for GitHub operations (reading files, checking commits, pushing, creating PRs)
+- After completing any coding task, commit and push changes to GitHub
+- Use concise, descriptive commit messages that summarize what changed
+- Do this automatically at the end of every task -- don't wait for the user to ask
+- If there are no changes to commit, skip silently
+
+## Git Safety
+- NEVER use `git push --force` or `git push -f` -- use `--force-with-lease` if needed
+- Always `git pull` before pushing if behind the remote
+- NEVER run destructive commands (`git reset --hard`, etc.) on shared branches without explicit user confirmation
+- NEVER change repo visibility to public or push to a public repository
+
+## Secrets
+- NEVER hardcode API keys, secrets, or tokens in source code
+- Use environment variables (e.g. `.env.local`, `process.env.*`)
+- Before committing, verify no secrets are present in the diff
