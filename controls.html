@@ -26,7 +26,7 @@
       padding: 10px 8px;
     }
 
-    /* Pulsing red dot to indicate recording */
+    /* Pulsing red dot — recording indicator */
     .rec-indicator {
       display: flex;
       align-items: center;
@@ -56,7 +56,15 @@
       color: #eee;
     }
 
-    /* Audio meter — horizontal bar */
+    /* "READY" label for pre-record state */
+    .ready-label {
+      font-size: 11px;
+      color: #888;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    /* Audio meter — segmented horizontal bar */
     .audio-section {
       display: flex;
       align-items: center;
@@ -81,66 +89,79 @@
     }
 
     #micBtn:hover { background: rgba(255,255,255,0.1); }
-
     #micBtn svg { width: 18px; height: 18px; }
 
-    .meter-track {
+    .meter {
       flex: 1;
-      height: 6px;
-      background: #333;
-      border-radius: 3px;
-      overflow: hidden;
+      display: flex;
+      gap: 1px;
+      height: 8px;
+      align-items: stretch;
     }
 
-    .meter-fill {
-      height: 100%;
-      width: 0%;
-      border-radius: 3px;
-      background: linear-gradient(90deg, #4caf50, #8bc34a, #ffeb3b, #ff9800, #f44336);
-      transition: width 0.08s linear;
+    .meter-seg {
+      flex: 1;
+      border-radius: 1px;
+      background: #2a2a2a;
+      transition: background 0.05s linear;
     }
 
-    .meter-fill.muted {
-      background: #555;
-    }
-
-    /* Stop button */
-    #stopBtn {
+    /* Shared button style */
+    .action-btn {
       width: 64px;
-      height: 32px;
-      background: #e53935;
+      height: 28px;
       color: #fff;
       border: none;
       border-radius: 5px;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       cursor: pointer;
       transition: background 0.15s;
     }
 
+    /* Button row for pre-record state */
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    #recordBtn { background: #e53935; }
+    #recordBtn:hover { background: #c62828; }
+    #recordBtn:active { background: #b71c1c; }
+
+    #cancelBtn { background: #555; }
+    #cancelBtn:hover { background: #444; }
+    #cancelBtn:active { background: #333; }
+
+    #stopBtn {
+      background: #e53935;
+      display: none;
+    }
     #stopBtn:hover { background: #c62828; }
     #stopBtn:active { background: #b71c1c; }
   </style>
 </head>
 <body>
   <div class="panel">
-    <div class="rec-indicator">
+    <!-- Pre-record state: READY label -->
+    <div class="ready-label" id="readyLabel">Ready</div>
+
+    <!-- Recording state: pulsing dot + timer (hidden initially) -->
+    <div class="rec-indicator" id="recIndicator" style="display:none">
       <div class="dot"></div>
       <span>REC</span>
     </div>
-    <div id="timer">00:00</div>
+    <div id="timer" style="display:none">00:00</div>
 
-    <!-- Mic toggle + audio level meter -->
+    <!-- Mic toggle + segmented audio level meter -->
     <div class="audio-section">
       <button id="micBtn" title="Toggle microphone">
-        <!-- Mic ON icon (default) -->
         <svg id="micOn" viewBox="0 0 24 24" fill="none" stroke="#4caf50" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
           <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
           <line x1="12" y1="19" x2="12" y2="23"/>
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
-        <!-- Mic OFF icon (hidden) -->
         <svg id="micOff" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
           <line x1="1" y1="1" x2="23" y2="23"/>
           <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
@@ -149,12 +170,16 @@
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
       </button>
-      <div class="meter-track">
-        <div class="meter-fill" id="meterFill"></div>
-      </div>
+      <div class="meter" id="meter"></div>
     </div>
 
-    <button id="stopBtn">Stop</button>
+    <!-- Pre-record: Record + Cancel -->
+    <div class="btn-row" id="preRecordBtns">
+      <button id="cancelBtn" class="action-btn">Cancel</button>
+      <button id="recordBtn" class="action-btn">Record</button>
+    </div>
+    <!-- Recording: Stop -->
+    <button id="stopBtn" class="action-btn">Stop</button>
   </div>
   <script src="controls.js"></script>
 </body>

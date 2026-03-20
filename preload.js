@@ -11,12 +11,18 @@ contextBridge.exposeInMainWorld('api', {
   // Controls: stop the recording
   stopRecording: () => ipcRenderer.send('stop-recording'),
 
+  // Controls: start recording (from pre-record state)
+  startRecording: () => ipcRenderer.send('start-recording'),
+
+  // Controls: cancel pre-record and go back to idle
+  cancelPrerecord: () => ipcRenderer.send('cancel-prerecord'),
+
   // Controls: toggle microphone mute/unmute
   toggleMic: () => ipcRenderer.send('toggle-mic'),
 
-  // Controls: listen for audio level updates from main process
-  onAudioLevel: (cb) => ipcRenderer.on('audio-level', (_e, level) => cb(level)),
-
   // Controls: listen for mic muted state changes
   onMicMuted: (cb) => ipcRenderer.on('mic-muted', (_e, muted) => cb(muted)),
+
+  // Controls: listen for recording-started (transition from pre-record to recording)
+  onRecordingStarted: (cb) => ipcRenderer.on('recording-started', () => cb()),
 });

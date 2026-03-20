@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen, Tray, Menu, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
-const { spawn, execFileSync, execFile } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const os = require('os');
 
 const ffmpegPath = require('ffmpeg-static');
@@ -10,8 +10,9 @@ let controlsWindow = null;
 let borderWindow  = null;
 let tray          = null;
 let ffmpegProcess = null;
-let audioMeterProcess = null;
 let isRecording   = false;
+let isPendingRecord = false;  // true after region selected, before record pressed
+let pendingRegion = null;     // stored region awaiting record button
 let isMicMuted    = false;
 let micDeviceName = null;
 
@@ -61,63 +62,17 @@ function findMicDevice() {
     proc.stdout.on('data', (d) => { output += d.toString(); });
 
     proc.on('close', () => {
-      // Look for audio devices section, grab the first device name
+      // Match lines like: "Microphone (Device Name)" (audio)
       const lines = output.split('\n');
-      let inAudio = false;
       for (const line of lines) {
-        if (line.includes('DirectShow audio devices')) { inAudio = true; continue; }
-        if (inAudio) {
+        if (line.includes('(audio)')) {
           const match = line.match(/"([^"]+)"/);
-          if (match && !line.includes('Alternative name')) {
-            resolve(match[1]);
-            return;
-          }
+          if (match) { resolve(match[1]); return; }
         }
       }
       resolve(null);
     });
   });
-}
-
-// ---------------------------------------------------------------------------
-// Audio level meter — runs a separate ffmpeg that reads the mic and outputs
-// volume stats, which we parse and forward to the controls window
-// ---------------------------------------------------------------------------
-function startAudioMeter() {
-  if (!micDeviceName || !controlsWindow) return;
-
-  audioMeterProcess = spawn(ffmpegPath, [
-    '-f', 'dshow',
-    '-i', `audio=${micDeviceName}`,
-    '-af', 'astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-',
-    '-f', 'null', '-'
-  ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  // astats outputs RMS level values to stdout via ametadata print
-  audioMeterProcess.stdout.on('data', (data) => {
-    if (isMicMuted || !controlsWindow) return;
-    const text = data.toString();
-    const lines = text.split('\n');
-    for (const line of lines) {
-      const match = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+|inf|-inf)/);
-      if (match) {
-        const db = parseFloat(match[1]);
-        // Convert dB to 0-1 range: -60dB=0, 0dB=1
-        const level = isNaN(db) || db === -Infinity ? 0 : Math.max(0, Math.min(1, (db + 60) / 60));
-        try { controlsWindow.webContents.send('audio-level', level); } catch (_) {}
-      }
-    }
-  });
-
-  audioMeterProcess.on('close', () => { audioMeterProcess = null; });
-}
-
-function stopAudioMeter() {
-  if (audioMeterProcess) {
-    try { audioMeterProcess.stdin.write('q'); audioMeterProcess.stdin.end(); } catch (_) {}
-    try { audioMeterProcess.kill(); } catch (_) {}
-    audioMeterProcess = null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +134,7 @@ function createTray() {
 // Overlay window — fullscreen transparent selection UI
 // ---------------------------------------------------------------------------
 function startSelection() {
-  if (isRecording || overlayWindow) return; // already busy
+  if (isRecording || isPendingRecord || overlayWindow) return;
 
   disableWindowsSounds();
 
@@ -249,7 +204,7 @@ function createBorderWindow(region) {
 // ---------------------------------------------------------------------------
 function createControls() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  const panelWidth = 90, panelHeight = 190;
+  const panelWidth = 140, panelHeight = 190;
 
   controlsWindow = new BrowserWindow({
     x: width - panelWidth - 8,
@@ -274,18 +229,13 @@ function createControls() {
 // ---------------------------------------------------------------------------
 // ffmpeg recording
 // ---------------------------------------------------------------------------
-async function startRecording(region) {
+function startRecording(region) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const outputFile = path.join(os.homedir(), 'Desktop', `recording-${timestamp}.mp4`);
 
   // libx264 requires even dimensions
   const w = region.width  % 2 === 0 ? region.width  : region.width  - 1;
   const h = region.height % 2 === 0 ? region.height : region.height - 1;
-
-  // Discover mic on first recording
-  if (micDeviceName === null) {
-    micDeviceName = await findMicDevice() || false;
-  }
 
   const args = [
     '-f', 'gdigrab',
@@ -308,7 +258,6 @@ async function startRecording(region) {
     '-pix_fmt', 'yuv420p',
   );
 
-  // If audio is included, encode it with AAC
   if (micDeviceName && !isMicMuted) {
     args.push('-acodec', 'aac', '-b:a', '192k');
   }
@@ -318,15 +267,9 @@ async function startRecording(region) {
   ffmpegProcess = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
   ffmpegProcess.on('close', () => { ffmpegProcess = null; });
   isRecording = true;
-
-  // Start the audio level meter for the controls UI
-  if (micDeviceName && !isMicMuted) {
-    startAudioMeter();
-  }
 }
 
 function stopRecording() {
-  stopAudioMeter();
   if (ffmpegProcess) {
     try {
       ffmpegProcess.stdin.write('q');
@@ -337,6 +280,8 @@ function stopRecording() {
     ffmpegProcess = null;
   }
   isRecording = false;
+  isPendingRecord = false;
+  pendingRegion = null;
   isMicMuted = false;
 }
 
@@ -361,18 +306,49 @@ function cleanup() {
 // IPC handlers
 // ---------------------------------------------------------------------------
 
-// User finished drawing the selection rectangle
+// User finished drawing the selection rectangle — enter pre-record state
 ipcMain.on('region-selected', async (event, region) => {
   if (overlayWindow) { overlayWindow.close(); overlayWindow = null; }
+
+  // Discover mic before showing controls so the meter can start immediately
+  if (micDeviceName === null) {
+    micDeviceName = await findMicDevice() || false;
+  }
+
+  pendingRegion = region;
+  isPendingRecord = true;
+
   createBorderWindow(region);
   createControls();
+});
+
+// User clicked Record in the controls panel
+ipcMain.on('start-recording', async () => {
+  if (!pendingRegion || isRecording) return;
+  const region = pendingRegion;
+  pendingRegion = null;
+  isPendingRecord = false;
+
   await startRecording(region);
+
+  // Notify controls to switch to recording UI
+  if (controlsWindow) {
+    controlsWindow.webContents.send('recording-started');
+  }
 });
 
 // User pressed Escape on the overlay
 ipcMain.on('selection-cancelled', () => {
   if (overlayWindow) { overlayWindow.close(); overlayWindow = null; }
   restoreWindowsSounds();
+});
+
+// Cancel button clicked in pre-record state
+ipcMain.on('cancel-prerecord', () => {
+  isPendingRecord = false;
+  pendingRegion = null;
+  isMicMuted = false;
+  cleanupRecordingUI();
 });
 
 // Stop button clicked in controls panel
@@ -387,13 +363,6 @@ ipcMain.on('toggle-mic', () => {
   isMicMuted = !isMicMuted;
   if (controlsWindow) {
     controlsWindow.webContents.send('mic-muted', isMicMuted);
-  }
-  if (isMicMuted) {
-    stopAudioMeter();
-    // Send zero level so the meter goes silent
-    if (controlsWindow) controlsWindow.webContents.send('audio-level', 0);
-  } else if (isRecording && micDeviceName) {
-    startAudioMeter();
   }
 });
 
@@ -417,8 +386,7 @@ app.whenReady().then(() => {
 
   // Register global hotkey
   globalShortcut.register(HOTKEY, () => {
-    if (isRecording) {
-      // Hotkey also works as a stop shortcut
+    if (isRecording || isPendingRecord) {
       stopRecording();
       cleanupRecordingUI();
     } else {
