@@ -1,11 +1,30 @@
 {
   "name": "win-screen-record",
   "version": "1.0.0",
-  "description": "Lightweight Windows screen recorder",
+  "description": "Tiny Windows tray screen recorder — region capture, 60 fps MP4, mic meter, overlays kept out of the video",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JosephAHK/Win-Screen-Record.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JosephAHK/Win-Screen-Record/issues"
+  },
+  "homepage": "https://github.com/JosephAHK/Win-Screen-Record#readme",
+  "license": "MIT",
+  "keywords": [
+    "screen-recorder",
+    "windows",
+    "electron",
+    "ffmpeg",
+    "mp4",
+    "tray",
+    "region-capture"
+  ],
   "scripts": {
     "start": "electron ."
   },
+
   "dependencies": {
     "ffmpeg-static": "^5.2.0"
   },

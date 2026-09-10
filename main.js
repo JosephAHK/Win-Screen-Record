@@ -17,9 +17,11 @@ let audioTmpFile  = null;
 let finalOutFile  = null;
 let isRecording   = false;
 let isPendingRecord = false;  // true after region selected, before record pressed
-let pendingRegion = null;     // stored region awaiting record button
+let pendingRegion = null;     // stored region awaiting record button (DIP coords)
 let isMicMuted    = false;
 let micDeviceName = null;
+let useDshowAudio = false;
+let rendererAudioFile = null;
 
 // Hotkey to start a new selection (Ctrl+Shift+R)
 const HOTKEY = 'Ctrl+Shift+R';
@@ -54,9 +56,31 @@ function restoreWindowsSounds() {
 }
 
 // ---------------------------------------------------------------------------
-// Microphone device discovery — find the first available mic via ffmpeg/dshow
+// Convert overlay DIP region → physical pixels for ffmpeg gdigrab
 // ---------------------------------------------------------------------------
-function findMicDevice() {
+function regionToPhysical(region) {
+  const display = screen.getPrimaryDisplay();
+  const physical = screen.dipToScreenRect(null, {
+    x: display.bounds.x + region.x,
+    y: display.bounds.y + region.y,
+    width: region.width,
+    height: region.height,
+  });
+
+  // libx264 / yuv420p require even dimensions
+  const width  = physical.width  % 2 === 0 ? physical.width  : physical.width  - 1;
+  const height = physical.height % 2 === 0 ? physical.height : physical.height - 1;
+
+  return { x: physical.x, y: physical.y, width, height };
+}
+
+// ---------------------------------------------------------------------------
+// Microphone device discovery — list DirectShow audio devices and pick the
+// one that matches the Chromium/default mic (not just the first listed).
+// ---------------------------------------------------------------------------
+const VIRTUAL_MIC_RE = /stereo mix|what u hear|wave link|cable output|voicemeeter|vb-audio/i;
+
+function listDshowAudioDevices() {
   return new Promise((resolve) => {
     const proc = spawn(ffmpegPath, [
       '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'
@@ -67,17 +91,46 @@ function findMicDevice() {
     proc.stdout.on('data', (d) => { output += d.toString(); });
 
     proc.on('close', () => {
-      // Match lines like: "Microphone (Device Name)" (audio)
-      const lines = output.split('\n');
-      for (const line of lines) {
-        if (line.includes('(audio)')) {
-          const match = line.match(/"([^"]+)"/);
-          if (match) { resolve(match[1]); return; }
-        }
+      const devices = [];
+      for (const line of output.split('\n')) {
+        if (!line.includes('(audio)')) continue;
+        const match = line.match(/"([^"]+)"/);
+        if (match) devices.push(match[1]);
       }
-      resolve(null);
+      resolve(devices);
     });
   });
+}
+
+function normalizeDeviceName(name) {
+  return String(name || '').toLowerCase().replace(/[^\w]+/g, ' ').trim();
+}
+
+function pickMicDevice(devices, preferredLabel) {
+  if (!devices.length) return null;
+
+  const preferred = normalizeDeviceName(preferredLabel);
+  if (preferred) {
+    const exact = devices.find((name) => normalizeDeviceName(name) === preferred);
+    if (exact) return exact;
+
+    const overlapping = devices.find((name) => {
+      const current = normalizeDeviceName(name);
+      return current.includes(preferred) || preferred.includes(current);
+    });
+    if (overlapping) return overlapping;
+  }
+
+  return devices.find((name) => !VIRTUAL_MIC_RE.test(name)) || devices[0];
+}
+
+function findMicDevice(preferredLabel) {
+  return listDshowAudioDevices().then((devices) => pickMicDevice(devices, preferredLabel));
+}
+
+function callControls(script) {
+  if (!controlsWindow || controlsWindow.isDestroyed()) return Promise.resolve(null);
+  return controlsWindow.webContents.executeJavaScript(script, true).catch(() => null);
 }
 
 // ---------------------------------------------------------------------------
@@ -143,17 +196,19 @@ function startSelection() {
 
   disableWindowsSounds();
 
-  const { width, height } = screen.getPrimaryDisplay().bounds;
+  const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
 
   overlayWindow = new BrowserWindow({
-    x: 0, y: 0, width, height,
+    x, y, width, height,
     transparent: true,
+    backgroundColor: '#00000000',
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
     movable: false,
     focusable: true,
+    hasShadow: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -163,6 +218,7 @@ function startSelection() {
 
   overlayWindow.loadFile('overlay.html');
   overlayWindow.setIgnoreMouseEvents(false);
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.focus();
 }
 
@@ -172,55 +228,180 @@ function startSelection() {
 // inside the captured area and won't appear in the recording.
 // ---------------------------------------------------------------------------
 function createBorderWindow(region) {
-  const borderSize = 3; // px — drawn as an inset border inside this window
-  const offset = borderSize; // expand window outward by exactly the border thickness
+  if (borderWindow) {
+    borderWindow.close();
+    borderWindow = null;
+  }
+
+  const borderSize = 3; // px — solid strips outside the recorded region
+  const offset = borderSize;
+  const display = screen.getPrimaryDisplay();
+
+  // Region is relative to the primary display overlay (DIP)
+  const winX = Math.round(display.bounds.x + region.x - offset);
+  const winY = Math.round(display.bounds.y + region.y - offset);
+  const winW = Math.round(region.width  + offset * 2);
+  const winH = Math.round(region.height + offset * 2);
 
   borderWindow = new BrowserWindow({
-    x: region.x - offset,
-    y: region.y - offset,
-    width:  region.width  + offset * 2,
-    height: region.height + offset * 2,
+    x: winX,
+    y: winY,
+    width:  winW,
+    height: winH,
     transparent: true,
+    backgroundColor: '#00000000',
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
     movable: false,
     focusable: false,
+    hasShadow: false,
+    thickFrame: false,
+    show: false,
     webPreferences: { contextIsolation: true },
   });
 
   borderWindow.setIgnoreMouseEvents(true);
 
-  // The border is drawn as an inset on the expanded window, so it sits
-  // exactly at the edge of the recorded region without overlapping it.
-  const html = `<!DOCTYPE html><html><head><style>
+  // Solid edge strips (not CSS border) — more reliable on transparent Electron windows.
+  // Strips sit in the outer offset ring so they never enter the captured area.
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
     *{margin:0;padding:0;box-sizing:border-box}
     html,body{width:100%;height:100%;background:transparent;overflow:hidden}
-    .border{position:absolute;inset:0;border:${borderSize}px solid #e53935;border-radius:2px;animation:blink 1.8s ease-in-out infinite}
+    .e{position:absolute;background:#f43f5e;animation:blink 1.8s ease-in-out infinite}
+    .t,.b{left:0;right:0;height:${borderSize}px}
+    .t{top:0}.b{bottom:0}
+    .l,.r{top:0;bottom:0;width:${borderSize}px}
+    .l{left:0}.r{right:0}
     @keyframes blink{0%,100%{opacity:1}50%{opacity:0.45}}
-  </style></head><body><div class="border"></div></body></html>`;
+  </style></head><body>
+    <div class="e t"></div><div class="e r"></div><div class="e b"></div><div class="e l"></div>
+  </body></html>`;
 
   borderWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+
+  borderWindow.once('ready-to-show', () => {
+    if (!borderWindow) return;
+    borderWindow.showInactive();
+    borderWindow.setAlwaysOnTop(true, 'screen-saver');
+  });
+
+  borderWindow.on('closed', () => { borderWindow = null; });
 }
 
 // ---------------------------------------------------------------------------
-// Controls window — floating stop panel
+// Controls window — floating stop panel, parked outside the capture region
 // ---------------------------------------------------------------------------
-function createControls() {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  const panelWidth = 140, panelHeight = 190;
+function rectsOverlap(a, b, pad = 0) {
+  return !(
+    a.x + a.width  + pad <= b.x ||
+    b.x + b.width  + pad <= a.x ||
+    a.y + a.height + pad <= b.y ||
+    b.y + b.height + pad <= a.y
+  );
+}
+
+function overlapArea(a, b) {
+  const w = Math.max(0, Math.min(a.x + a.width,  b.x + b.width)  - Math.max(a.x, b.x));
+  const h = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return w * h;
+}
+
+function placeControlsPanel(region, panelWidth, panelHeight) {
+  const display = screen.getPrimaryDisplay();
+  const work = display.workArea;
+  const margin = 16;
+  const gap = 12;
+
+  const capture = {
+    x: display.bounds.x + region.x,
+    y: display.bounds.y + region.y,
+    width: region.width,
+    height: region.height,
+  };
+
+  const clamp = (x, y) => ({
+    x: Math.round(Math.min(Math.max(x, work.x + margin), work.x + work.width  - panelWidth  - margin)),
+    y: Math.round(Math.min(Math.max(y, work.y + margin), work.y + work.height - panelHeight - margin)),
+  });
+
+  const inWorkArea = (pos) =>
+    pos.x >= work.x &&
+    pos.y >= work.y &&
+    pos.x + panelWidth  <= work.x + work.width &&
+    pos.y + panelHeight <= work.y + work.height;
+
+  const avoidsCapture = (pos) =>
+    inWorkArea(pos) && !rectsOverlap(
+      { x: pos.x, y: pos.y, width: panelWidth, height: panelHeight },
+      capture,
+      gap
+    );
+
+  const midX = capture.x + capture.width  / 2 - panelWidth  / 2;
+  const midY = capture.y + capture.height / 2 - panelHeight / 2;
+  const rightX  = work.x + work.width  - panelWidth  - margin;
+  const leftX   = work.x + margin;
+  const topY    = work.y + margin;
+  const bottomY = work.y + work.height - panelHeight - margin;
+
+  const rawCandidates = [
+    { x: capture.x + capture.width + gap,  y: midY },
+    { x: capture.x - panelWidth - gap,     y: midY },
+    { x: midX, y: capture.y + capture.height + gap },
+    { x: midX, y: capture.y - panelHeight - gap },
+    { x: capture.x + capture.width + gap,  y: capture.y },
+    { x: capture.x - panelWidth - gap,     y: capture.y },
+    { x: capture.x + capture.width + gap,  y: capture.y + capture.height - panelHeight },
+    { x: capture.x - panelWidth - gap,     y: capture.y + capture.height - panelHeight },
+    { x: rightX, y: midY },
+    { x: leftX,  y: midY },
+    { x: midX,   y: topY },
+    { x: midX,   y: bottomY },
+    { x: rightX, y: topY },
+    { x: leftX,  y: topY },
+    { x: rightX, y: bottomY },
+    { x: leftX,  y: bottomY },
+  ];
+
+  for (const raw of rawCandidates) {
+    const pos = clamp(raw.x, raw.y);
+    if (avoidsCapture(pos)) return pos;
+  }
+
+  // Full-screen (or near) selection: pick the work-area spot with the least overlap
+  let best = clamp(rightX, midY);
+  let bestOverlap = Infinity;
+  for (const raw of rawCandidates) {
+    const pos = clamp(raw.x, raw.y);
+    const area = overlapArea(
+      { x: pos.x, y: pos.y, width: panelWidth, height: panelHeight },
+      capture
+    );
+    if (area < bestOverlap) {
+      bestOverlap = area;
+      best = pos;
+    }
+  }
+  return best;
+}
+
+function createControls(region) {
+  const panelWidth = 248, panelHeight = 292;
+  const { x, y } = placeControlsPanel(region, panelWidth, panelHeight);
 
   controlsWindow = new BrowserWindow({
-    x: width - panelWidth - 8,
-    y: Math.floor(height / 2) - Math.floor(panelHeight / 2),
+    x, y,
     width: panelWidth, height: panelHeight,
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
     movable: true,
-    transparent: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -229,6 +410,7 @@ function createControls() {
   });
 
   controlsWindow.loadFile('controls.html');
+  controlsWindow.setAlwaysOnTop(true, 'screen-saver');
 }
 
 // ---------------------------------------------------------------------------
@@ -242,17 +424,16 @@ function startRecording(region) {
   audioTmpFile = path.join(tmpDir, `rec-audio-${timestamp}.m4a`);
   finalOutFile = path.join(os.homedir(), 'Desktop', `recording-${timestamp}.mp4`);
 
-  // libx264 requires even dimensions
-  const w = region.width  % 2 === 0 ? region.width  : region.width  - 1;
-  const h = region.height % 2 === 0 ? region.height : region.height - 1;
+  // Overlay/UI use DIP; ffmpeg gdigrab needs physical screen pixels
+  const capture = regionToPhysical(region);
 
   // Video-only process
   ffmpegVideo = spawn(ffmpegPath, [
     '-f', 'gdigrab',
     '-framerate', '60',
-    '-offset_x', String(region.x),
-    '-offset_y', String(region.y),
-    '-video_size', `${w}x${h}`,
+    '-offset_x', String(capture.x),
+    '-offset_y', String(capture.y),
+    '-video_size', `${capture.width}x${capture.height}`,
     '-i', 'desktop',
     '-vcodec', 'libx264',
     '-crf', '15',
@@ -262,19 +443,27 @@ function startRecording(region) {
   ], { stdio: ['pipe', 'ignore', 'ignore'] });
   ffmpegVideo.on('close', () => { ffmpegVideo = null; });
 
-  // Audio-only process (if mic available and not muted)
-  if (micDeviceName && !isMicMuted) {
+  // DirectShow fallback only when Chromium is not already capturing the mic.
+  // Elgato devices typically allow one client; the meter/MediaRecorder path
+  // is preferred because it uses the same stream the user can already hear.
+  if (micDeviceName && !isMicMuted && useDshowAudio) {
     ffmpegAudio = spawn(ffmpegPath, [
       '-f', 'dshow',
       '-i', `audio=${micDeviceName}`,
       '-acodec', 'aac',
       '-b:a', '192k',
       audioTmpFile,
-    ], { stdio: ['pipe', 'ignore', 'ignore'] });
+    ], { stdio: ['pipe', 'ignore', 'pipe'] });
     ffmpegAudio.on('close', () => { ffmpegAudio = null; });
   }
 
   isRecording = true;
+
+  // Keep the capture frame above other windows while recording
+  if (borderWindow && !borderWindow.isDestroyed()) {
+    borderWindow.setAlwaysOnTop(true, 'screen-saver');
+    borderWindow.showInactive();
+  }
 }
 
 // Gracefully stop an ffmpeg process and wait for it to exit
@@ -288,45 +477,69 @@ function stopFfmpeg(proc) {
   });
 }
 
-async function stopRecording() {
-  const hadAudio = !!ffmpegAudio;
+function audioFileLooksValid(filePath) {
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).size > 256;
+  } catch (_) {
+    return false;
+  }
+}
 
-  // Stop both processes in parallel, wait for both to finish writing
+function muxVideoAndAudio(videoPath, audioPath, outPath, copyAudio) {
+  return new Promise((resolve, reject) => {
+    const args = copyAudio
+      ? ['-i', videoPath, '-i', audioPath, '-c', 'copy', '-movflags', '+faststart', outPath]
+      : [
+          '-i', videoPath, '-i', audioPath,
+          '-map', '0:v:0', '-map', '1:a:0',
+          '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+          '-movflags', '+faststart',
+          outPath,
+        ];
+    const mux = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'ignore'] });
+    mux.on('close', (code) => { code === 0 ? resolve() : reject(); });
+  });
+}
+
+async function stopRecording() {
+  const rendererAudio = await callControls('window.__flushMicRecording()');
+  const hadDshowAudio = !!ffmpegAudio;
+
   await Promise.all([stopFfmpeg(ffmpegVideo), stopFfmpeg(ffmpegAudio)]);
   ffmpegVideo = null;
   ffmpegAudio = null;
 
-  // Mux video + audio into the final file (or just move video if no audio)
-  if (hadAudio && videoTmpFile && audioTmpFile && finalOutFile) {
+  if (rendererAudio?.base64) {
+    const ext = String(rendererAudio.mime || '').includes('ogg') ? 'ogg' : 'webm';
+    rendererAudioFile = path.join(os.tmpdir(), `rec-mic-${Date.now()}.${ext}`);
+    fs.writeFileSync(rendererAudioFile, Buffer.from(rendererAudio.base64, 'base64'));
+  }
+
+  const audioSource = audioFileLooksValid(rendererAudioFile)
+    ? { path: rendererAudioFile, copy: false }
+    : (hadDshowAudio && audioFileLooksValid(audioTmpFile)
+      ? { path: audioTmpFile, copy: true }
+      : null);
+
+  if (audioSource && videoTmpFile && finalOutFile) {
     try {
-      // Mux with stream copy — near-instant, no re-encoding
-      await new Promise((resolve, reject) => {
-        const mux = spawn(ffmpegPath, [
-          '-i', videoTmpFile,
-          '-i', audioTmpFile,
-          '-c', 'copy',
-          '-movflags', '+faststart',
-          '-shortest',
-          finalOutFile,
-        ], { stdio: ['ignore', 'ignore', 'ignore'] });
-        mux.on('close', (code) => {
-          try { fs.unlinkSync(videoTmpFile); } catch (_) {}
-          try { fs.unlinkSync(audioTmpFile); } catch (_) {}
-          code === 0 ? resolve() : reject();
-        });
-      });
+      await muxVideoAndAudio(videoTmpFile, audioSource.path, finalOutFile, audioSource.copy);
+      try { fs.unlinkSync(videoTmpFile); } catch (_) {}
     } catch (_) {
-      // If mux fails, keep the video-only file as fallback
       try { fs.renameSync(videoTmpFile, finalOutFile); } catch (__) {}
-      try { fs.unlinkSync(audioTmpFile); } catch (__) {}
     }
   } else if (videoTmpFile && finalOutFile) {
     try { fs.renameSync(videoTmpFile, finalOutFile); } catch (_) {}
   }
 
+  try { if (audioTmpFile) fs.unlinkSync(audioTmpFile); } catch (_) {}
+  try { if (rendererAudioFile) fs.unlinkSync(rendererAudioFile); } catch (_) {}
+
   videoTmpFile = null;
   audioTmpFile = null;
+  rendererAudioFile = null;
   finalOutFile = null;
+  useDshowAudio = false;
   isRecording = false;
   isPendingRecord = false;
   pendingRegion = null;
@@ -358,28 +571,47 @@ async function cleanup() {
 ipcMain.on('region-selected', async (event, region) => {
   if (overlayWindow) { overlayWindow.close(); overlayWindow = null; }
 
-  // Discover mic before showing controls so the meter can start immediately
   if (micDeviceName === null) {
     micDeviceName = await findMicDevice() || false;
   }
 
-  pendingRegion = region;
+  pendingRegion = {
+    x: Math.round(region.x),
+    y: Math.round(region.y),
+    width: Math.round(region.width),
+    height: Math.round(region.height),
+  };
   isPendingRecord = true;
 
-  createBorderWindow(region);
-  createControls();
+  createBorderWindow(pendingRegion);
+  createControls(pendingRegion);
 });
 
 // User clicked Record in the controls panel
-ipcMain.on('start-recording', () => {
+ipcMain.on('start-recording', async () => {
   if (!pendingRegion || isRecording) return;
   const region = pendingRegion;
   pendingRegion = null;
   isPendingRecord = false;
 
+  let capturingInRenderer = false;
+  if (!isMicMuted) {
+    capturingInRenderer = !!(await callControls('window.__beginMicCapture()'));
+  }
+
+  if (capturingInRenderer) {
+    useDshowAudio = false;
+  } else if (!isMicMuted) {
+    const label = await callControls('window.__getMicLabel()');
+    await callControls('window.__releaseMic()');
+    micDeviceName = await findMicDevice(label || undefined) || micDeviceName || false;
+    useDshowAudio = !!micDeviceName;
+  } else {
+    useDshowAudio = false;
+  }
+
   startRecording(region);
 
-  // Notify controls to switch to recording UI
   if (controlsWindow) {
     controlsWindow.webContents.send('recording-started');
   }
@@ -401,8 +633,8 @@ ipcMain.on('cancel-prerecord', () => {
 
 // Stop button clicked in controls panel
 ipcMain.on('stop-recording', async () => {
-  cleanupRecordingUI();
   await stopRecording();
+  cleanupRecordingUI();
 });
 
 // Mic mute/unmute toggle from controls panel
@@ -434,8 +666,8 @@ app.whenReady().then(() => {
   // Register global hotkey
   globalShortcut.register(HOTKEY, async () => {
     if (isRecording || isPendingRecord) {
-      cleanupRecordingUI();
       await stopRecording();
+      cleanupRecordingUI();
     } else {
       startSelection();
     }

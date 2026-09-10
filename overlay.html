@@ -4,6 +4,15 @@
   <meta charset="UTF-8" />
   <title>Select Region</title>
   <style>
+    :root {
+      --accent: #22d3ee;
+      --accent-ink: #082f3a;
+      --surface: rgba(15, 20, 28, 0.88);
+      --border: rgba(255, 255, 255, 0.1);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     html, body {
@@ -13,52 +22,154 @@
       background: transparent;
       cursor: crosshair;
       user-select: none;
+      font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     }
 
-    /* Semi-transparent dark overlay that covers everything */
     #mask {
       position: absolute;
       inset: 0;
-      background: rgba(0, 0, 0, 0.35);
+      background: rgba(6, 10, 16, 0.38);
     }
 
-    /* The selection rectangle - punches through the mask visually */
     #selection {
       position: absolute;
-      border: 2px solid #00d4ff;
-      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35); /* dim outside selection */
+      border: 2px solid var(--accent);
+      box-shadow:
+        0 0 0 1px rgba(34, 211, 238, 0.24),
+        0 0 0 9999px rgba(6, 10, 16, 0.42);
       background: transparent;
       display: none;
       pointer-events: none;
+      border-radius: 2px;
     }
 
-    /* Instruction label */
+    #sizeLabel {
+      position: absolute;
+      left: 0;
+      top: 0;
+      transform: translateY(calc(-100% - 8px));
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+      padding: 4px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+    }
+
+    #ratioBar {
+      position: absolute;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      cursor: default;
+      z-index: 10;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+      backdrop-filter: blur(16px);
+    }
+
+    #ratioBar .label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 0 8px 0 6px;
+      pointer-events: none;
+    }
+
+    #ratioBar button {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: #e5e7eb;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    #ratioBar button:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    #ratioBar button.active {
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+
+    #ratioBar button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     #hint {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      color: #fff;
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 18px;
-      text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+      color: var(--text);
       pointer-events: none;
       text-align: center;
-      line-height: 1.6;
+      padding: 20px 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
+      backdrop-filter: blur(16px);
+      max-width: 28rem;
+    }
+
+    #hint strong {
+      display: block;
+      font-size: 18px;
+      font-weight: 650;
+      line-height: 1.25;
+      letter-spacing: -0.02em;
     }
 
     #hint span {
+      display: block;
+      margin-top: 8px;
       font-size: 13px;
-      opacity: 0.7;
+      line-height: 1.5;
+      color: var(--text-muted);
+      font-weight: 400;
     }
   </style>
 </head>
 <body>
   <div id="mask"></div>
-  <div id="selection"></div>
+  <div id="selection">
+    <div id="sizeLabel"></div>
+  </div>
+  <div id="ratioBar">
+    <span class="label">Aspect</span>
+    <button type="button" data-ratio="free" class="active">Free</button>
+    <button type="button" data-ratio="16:9">16:9</button>
+    <button type="button" data-ratio="9:16">9:16</button>
+    <button type="button" data-ratio="4:3">4:3</button>
+    <button type="button" data-ratio="1:1">1:1</button>
+    <button type="button" data-ratio="21:9">21:9</button>
+  </div>
   <div id="hint">
-    Drag to select recording area<br>
-    <span>Press Esc to cancel</span>
+    <strong>Drag to select a recording area</strong>
+    <span>Choose an aspect ratio above · Esc to cancel</span>
   </div>
   <script src="overlay.js"></script>
 </body>
