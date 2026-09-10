@@ -116,8 +116,8 @@
     .audio-card {
       -webkit-app-region: no-drag;
       display: flex;
-      align-items: flex-start;
-      gap: 8px;
+      flex-direction: column;
+      gap: 10px;
       width: 100%;
       padding: 8px;
       background: var(--bg-elevated);
@@ -125,16 +125,17 @@
       border-radius: 12px;
     }
 
-    .mic-picker {
-      flex: 1;
-      min-width: 0;
+    .mic-row {
       display: flex;
-      flex-direction: column;
+      align-items: center;
       gap: 8px;
+      min-width: 0;
     }
 
     .mic-select-wrap {
       position: relative;
+      flex: 1;
+      min-width: 0;
     }
 
     .mic-select-wrap::after {
@@ -215,17 +216,21 @@
     #micBtn svg { width: 16px; height: 16px; }
 
     .meter {
-      flex: 1;
       display: flex;
       gap: 2px;
-      height: 10px;
+      width: 100%;
+      height: 12px;
+      padding: 2px;
       align-items: stretch;
+      flex-shrink: 0;
+      background: #0d1118;
+      border-radius: 6px;
     }
 
     .meter-seg {
       flex: 1;
       border-radius: 2px;
-      background: #2a3344;
+      background: #3b4558;
       transition: background 0.05s linear;
     }
 
@@ -303,29 +308,29 @@
     </div>
 
     <div class="audio-card">
-      <button id="micBtn" title="Toggle microphone" type="button">
-        <svg id="micOn" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-        <svg id="micOff" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <line x1="1" y1="1" x2="23" y2="23"/>
-          <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
-          <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .76-.13 1.49-.35 2.17"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-      </button>
-      <div class="mic-picker">
+      <div class="mic-row">
+        <button id="micBtn" title="Toggle microphone" type="button">
+          <svg id="micOn" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          <svg id="micOff" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+            <line x1="1" y1="1" x2="23" y2="23"/>
+            <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+            <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .76-.13 1.49-.35 2.17"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
         <div class="mic-select-wrap">
           <select id="micSelect" title="Choose microphone" aria-label="Microphone">
             <option value="">Default microphone</option>
           </select>
         </div>
-        <div class="meter" id="meter"></div>
       </div>
+      <div class="meter" id="meter" aria-hidden="true"></div>
     </div>
 
     <div class="actions">

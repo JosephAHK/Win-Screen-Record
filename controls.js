@@ -35,7 +35,7 @@ for (let i = 0; i < SEG_COUNT; i++) {
   else if (ratio < 0.92) segColors.push('#fb923c');
   else                    segColors.push('#f43f5e');
 }
-const SEG_OFF = '#2a3344';
+const SEG_OFF = '#3b4558';
 
 // ---------------------------------------------------------------------------
 // Web Audio API mic meter + MediaRecorder capture
